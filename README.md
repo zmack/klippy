@@ -13,9 +13,39 @@ make run
 
 | Method | Endpoint       | Description                              |
 |--------|----------------|------------------------------------------|
-| GET    | `/clippings`   | All clippings                            |
-| GET    | `/books`       | List of books (id, title, author, count) |
-| GET    | `/books/:id`   | Single book with nested clippings        |
+| GET    | `/clippings`   | All clippings (paginated)                |
+| GET    | `/books`       | List of books (paginated)                |
+| GET    | `/books/:id`   | Single book with clippings (paginated)   |
+
+### Pagination
+
+All endpoints support pagination via query params:
+
+```
+?limit=20&offset=0
+```
+
+- `limit`: max items per page (default: 20, max: 100)
+- `offset`: number of items to skip
+
+### Response Format
+
+```json
+{
+  "data": [...],
+  "meta": {
+    "total": 722,
+    "limit": 20,
+    "offset": 0,
+    "has_more": true
+  }
+}
+```
+
+### Ordering
+
+- **Books**: by most recent clipping date (desc), then by ID
+- **Clippings**: by date added (desc, newest first)
 
 ## Project Structure
 
@@ -77,5 +107,4 @@ Highlighted text here
 
 - [ ] Authentication
 - [ ] Search/filter endpoints
-- [ ] Pagination for large responses
 - [ ] ISO 8601 date formatting in JSON

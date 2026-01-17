@@ -6,6 +6,21 @@ const Book = domain.Book;
 
 const Allocator = std.mem.Allocator;
 
+const DEFAULT_LIMIT: usize = 20;
+const MAX_LIMIT: usize = 100;
+
+const Pagination = struct {
+    limit: usize,
+    offset: usize,
+};
+
+const PageMeta = struct {
+    total: usize,
+    limit: usize,
+    offset: usize,
+    has_more: bool,
+};
+
 pub const Server = struct {
     allocator: Allocator,
     library: *const Library,
@@ -55,49 +70,77 @@ pub const Server = struct {
 
         var parts = std.mem.splitScalar(u8, first_line, ' ');
         const method = parts.next() orelse return;
-        const path = parts.next() orelse return;
+        const full_path = parts.next() orelse return;
 
         if (!std.mem.eql(u8, method, "GET")) {
             try self.sendMethodNotAllowed(conn.stream);
             return;
         }
 
+        const path = parsePath(full_path);
+        const pagination = parseQueryParams(full_path);
+
         if (std.mem.eql(u8, path, "/clippings")) {
-            try self.handleGetClippings(conn.stream);
+            try self.handleGetClippings(conn.stream, pagination);
         } else if (std.mem.eql(u8, path, "/books")) {
-            try self.handleGetBooks(conn.stream);
+            try self.handleGetBooks(conn.stream, pagination);
         } else if (std.mem.startsWith(u8, path, "/books/")) {
             const book_id = path[7..];
-            try self.handleGetBook(conn.stream, book_id);
+            try self.handleGetBook(conn.stream, book_id, pagination);
         } else {
             try self.sendNotFound(conn.stream);
         }
     }
 
-    fn handleGetClippings(self: *Server, stream: std.net.Stream) !void {
-        const clippings = self.library.getAllClippings();
-        const json = try self.clippingsToJson(clippings);
+    fn handleGetClippings(self: *Server, stream: std.net.Stream, pagination: Pagination) !void {
+        const all_clippings = self.library.getAllClippings();
+        const page = paginate(Clipping, all_clippings, pagination);
+        const meta = PageMeta{
+            .total = all_clippings.len,
+            .limit = pagination.limit,
+            .offset = pagination.offset,
+            .has_more = pagination.offset + page.len < all_clippings.len,
+        };
+
+        const json = try self.clippingsToJsonPaged(page, meta);
         defer self.allocator.free(json);
         try self.sendJson(stream, json);
     }
 
-    fn handleGetBooks(self: *Server, stream: std.net.Stream) !void {
-        const books = self.library.getBooks();
-        const json = try self.booksToJson(books);
+    fn handleGetBooks(self: *Server, stream: std.net.Stream, pagination: Pagination) !void {
+        const all_books = self.library.getBooks();
+        const page = paginate(Book, all_books, pagination);
+        const meta = PageMeta{
+            .total = all_books.len,
+            .limit = pagination.limit,
+            .offset = pagination.offset,
+            .has_more = pagination.offset + page.len < all_books.len,
+        };
+
+        const json = try self.booksToJsonPaged(page, meta);
         defer self.allocator.free(json);
         try self.sendJson(stream, json);
     }
 
-    fn handleGetBook(self: *Server, stream: std.net.Stream, book_id: []const u8) !void {
+    fn handleGetBook(self: *Server, stream: std.net.Stream, book_id: []const u8, pagination: Pagination) !void {
         const book = self.library.getBookById(book_id) orelse {
             try self.sendNotFound(stream);
             return;
         };
 
-        const clippings = self.library.getClippingsForBook(book_id);
-        defer if (clippings) |c| self.allocator.free(c);
+        const all_clippings = self.library.getClippingsForBook(book_id);
+        defer if (all_clippings) |c| self.allocator.free(c);
 
-        const json = try self.bookWithClippingsToJson(book, clippings orelse &[_]Clipping{});
+        const clippings = all_clippings orelse &[_]Clipping{};
+        const page = paginate(Clipping, clippings, pagination);
+        const meta = PageMeta{
+            .total = clippings.len,
+            .limit = pagination.limit,
+            .offset = pagination.offset,
+            .has_more = pagination.offset + page.len < clippings.len,
+        };
+
+        const json = try self.bookWithClippingsToJsonPaged(book, page, meta);
         defer self.allocator.free(json);
         try self.sendJson(stream, json);
     }
@@ -122,35 +165,39 @@ pub const Server = struct {
         _ = try stream.write(response);
     }
 
-    fn clippingsToJson(self: *Server, clippings: []const Clipping) ![]u8 {
+    fn clippingsToJsonPaged(self: *Server, clippings: []const Clipping, meta: PageMeta) ![]u8 {
         var json: std.ArrayListUnmanaged(u8) = .empty;
         var writer = json.writer(self.allocator);
 
-        try writer.writeByte('[');
+        try writer.writeAll("{\"data\":[");
         for (clippings, 0..) |clipping, i| {
             if (i > 0) try writer.writeByte(',');
             try self.writeClippingJson(writer, clipping);
         }
-        try writer.writeByte(']');
+        try writer.writeAll("],\"meta\":");
+        try writePageMeta(writer, meta);
+        try writer.writeByte('}');
 
         return json.toOwnedSlice(self.allocator);
     }
 
-    fn booksToJson(self: *Server, books: []const Book) ![]u8 {
+    fn booksToJsonPaged(self: *Server, books: []const Book, meta: PageMeta) ![]u8 {
         var json: std.ArrayListUnmanaged(u8) = .empty;
         var writer = json.writer(self.allocator);
 
-        try writer.writeByte('[');
+        try writer.writeAll("{\"data\":[");
         for (books, 0..) |book, i| {
             if (i > 0) try writer.writeByte(',');
             try self.writeBookJson(writer, book);
         }
-        try writer.writeByte(']');
+        try writer.writeAll("],\"meta\":");
+        try writePageMeta(writer, meta);
+        try writer.writeByte('}');
 
         return json.toOwnedSlice(self.allocator);
     }
 
-    fn bookWithClippingsToJson(self: *Server, book: Book, clippings: []const Clipping) ![]u8 {
+    fn bookWithClippingsToJsonPaged(self: *Server, book: Book, clippings: []const Clipping, meta: PageMeta) ![]u8 {
         var json: std.ArrayListUnmanaged(u8) = .empty;
         var writer = json.writer(self.allocator);
 
@@ -167,7 +214,9 @@ pub const Server = struct {
             try self.writeClippingJson(writer, clipping);
         }
 
-        try writer.writeAll("]}");
+        try writer.writeAll("],\"meta\":");
+        try writePageMeta(writer, meta);
+        try writer.writeByte('}');
 
         return json.toOwnedSlice(self.allocator);
     }
@@ -210,6 +259,60 @@ pub const Server = struct {
     }
 };
 
+fn parsePath(full_path: []const u8) []const u8 {
+    if (std.mem.indexOf(u8, full_path, "?")) |idx| {
+        return full_path[0..idx];
+    }
+    return full_path;
+}
+
+fn parseQueryParams(full_path: []const u8) Pagination {
+    var limit: usize = DEFAULT_LIMIT;
+    var offset: usize = 0;
+
+    const query_start = std.mem.indexOf(u8, full_path, "?") orelse return .{ .limit = limit, .offset = offset };
+    const query = full_path[query_start + 1 ..];
+
+    var params = std.mem.splitScalar(u8, query, '&');
+    while (params.next()) |param| {
+        if (std.mem.indexOf(u8, param, "=")) |eq_idx| {
+            const key = param[0..eq_idx];
+            const value = param[eq_idx + 1 ..];
+
+            if (std.mem.eql(u8, key, "limit")) {
+                limit = std.fmt.parseInt(usize, value, 10) catch DEFAULT_LIMIT;
+                if (limit > MAX_LIMIT) limit = MAX_LIMIT;
+                if (limit == 0) limit = DEFAULT_LIMIT;
+            } else if (std.mem.eql(u8, key, "offset")) {
+                offset = std.fmt.parseInt(usize, value, 10) catch 0;
+            }
+        }
+    }
+
+    return .{ .limit = limit, .offset = offset };
+}
+
+fn paginate(comptime T: type, items: []const T, pagination: Pagination) []const T {
+    if (pagination.offset >= items.len) {
+        return &[_]T{};
+    }
+    const start = pagination.offset;
+    const end = @min(pagination.offset + pagination.limit, items.len);
+    return items[start..end];
+}
+
+fn writePageMeta(writer: anytype, meta: PageMeta) !void {
+    try writer.writeAll("{\"total\":");
+    try writer.print("{d}", .{meta.total});
+    try writer.writeAll(",\"limit\":");
+    try writer.print("{d}", .{meta.limit});
+    try writer.writeAll(",\"offset\":");
+    try writer.print("{d}", .{meta.offset});
+    try writer.writeAll(",\"has_more\":");
+    try writer.writeAll(if (meta.has_more) "true" else "false");
+    try writer.writeByte('}');
+}
+
 fn writeJsonString(writer: anytype, str: []const u8) !void {
     try writer.writeByte('"');
     for (str) |c| {
@@ -229,4 +332,38 @@ fn writeJsonString(writer: anytype, str: []const u8) !void {
         }
     }
     try writer.writeByte('"');
+}
+
+test "parse query params" {
+    const p1 = parseQueryParams("/clippings?limit=10&offset=20");
+    try std.testing.expectEqual(@as(usize, 10), p1.limit);
+    try std.testing.expectEqual(@as(usize, 20), p1.offset);
+}
+
+test "parse query params defaults" {
+    const p1 = parseQueryParams("/clippings");
+    try std.testing.expectEqual(@as(usize, DEFAULT_LIMIT), p1.limit);
+    try std.testing.expectEqual(@as(usize, 0), p1.offset);
+}
+
+test "parse query params max limit" {
+    const p1 = parseQueryParams("/clippings?limit=999");
+    try std.testing.expectEqual(@as(usize, MAX_LIMIT), p1.limit);
+}
+
+test "parse path" {
+    try std.testing.expectEqualStrings("/clippings", parsePath("/clippings?limit=10"));
+    try std.testing.expectEqualStrings("/books", parsePath("/books"));
+}
+
+test "paginate" {
+    const items = [_]u8{ 1, 2, 3, 4, 5 };
+    const page1 = paginate(u8, &items, .{ .limit = 2, .offset = 0 });
+    try std.testing.expectEqual(@as(usize, 2), page1.len);
+
+    const page2 = paginate(u8, &items, .{ .limit = 2, .offset = 2 });
+    try std.testing.expectEqual(@as(usize, 2), page2.len);
+
+    const page3 = paginate(u8, &items, .{ .limit = 2, .offset = 10 });
+    try std.testing.expectEqual(@as(usize, 0), page3.len);
 }
