@@ -3,6 +3,7 @@ const domain = @import("domain.zig");
 const Library = domain.Library;
 const Clipping = domain.Clipping;
 const Book = domain.Book;
+const SearchFields = domain.SearchFields;
 
 const Allocator = std.mem.Allocator;
 
@@ -19,6 +20,19 @@ const PageMeta = struct {
     limit: usize,
     offset: usize,
     has_more: bool,
+};
+
+const SearchType = enum {
+    all,
+    books,
+    clippings,
+};
+
+const SearchParams = struct {
+    query: ?[]const u8,
+    search_type: SearchType,
+    fields: SearchFields,
+    pagination: Pagination,
 };
 
 pub const Server = struct {
@@ -87,6 +101,9 @@ pub const Server = struct {
         } else if (std.mem.startsWith(u8, path, "/books/")) {
             const book_id = path[7..];
             try self.handleGetBook(conn.stream, book_id, pagination);
+        } else if (std.mem.eql(u8, path, "/search")) {
+            const search_params = parseSearchParams(full_path);
+            try self.handleSearch(conn.stream, search_params);
         } else {
             try self.sendNotFound(conn.stream);
         }
@@ -145,6 +162,80 @@ pub const Server = struct {
         try self.sendJson(stream, json);
     }
 
+    fn handleSearch(self: *Server, stream: std.net.Stream, params: SearchParams) !void {
+        const query = params.query orelse {
+            try self.sendBadRequest(stream, "Missing required parameter: q");
+            return;
+        };
+
+        switch (params.search_type) {
+            .clippings => {
+                const all_results = self.library.searchClippings(query, params.fields);
+                defer self.allocator.free(all_results);
+                const page = paginate(Clipping, all_results, params.pagination);
+                const meta = PageMeta{
+                    .total = all_results.len,
+                    .limit = params.pagination.limit,
+                    .offset = params.pagination.offset,
+                    .has_more = params.pagination.offset + page.len < all_results.len,
+                };
+                const json = try self.clippingsToJsonPaged(page, meta);
+                defer self.allocator.free(json);
+                try self.sendJson(stream, json);
+            },
+            .books => {
+                const all_results = self.library.searchBooks(query, params.fields);
+                defer self.allocator.free(all_results);
+                const page = paginate(Book, all_results, params.pagination);
+                const meta = PageMeta{
+                    .total = all_results.len,
+                    .limit = params.pagination.limit,
+                    .offset = params.pagination.offset,
+                    .has_more = params.pagination.offset + page.len < all_results.len,
+                };
+                const json = try self.booksToJsonPaged(page, meta);
+                defer self.allocator.free(json);
+                try self.sendJson(stream, json);
+            },
+            .all => {
+                const all_clippings = self.library.searchClippings(query, params.fields);
+                defer self.allocator.free(all_clippings);
+                const all_books = self.library.searchBooks(query, params.fields);
+                defer self.allocator.free(all_books);
+
+                // Clippings first, books fill remainder
+                const clippings_limit = @min(params.pagination.limit, all_clippings.len);
+                const books_limit = params.pagination.limit -| clippings_limit;
+
+                const clippings_page = paginate(Clipping, all_clippings, .{
+                    .limit = clippings_limit,
+                    .offset = params.pagination.offset,
+                });
+                const clippings_meta = PageMeta{
+                    .total = all_clippings.len,
+                    .limit = clippings_limit,
+                    .offset = params.pagination.offset,
+                    .has_more = params.pagination.offset + clippings_page.len < all_clippings.len,
+                };
+
+                const books_page = paginate(Book, all_books, .{
+                    .limit = books_limit,
+                    .offset = 0,
+                });
+                const books_meta = PageMeta{
+                    .total = all_books.len,
+                    .limit = books_limit,
+                    .offset = 0,
+                    .has_more = books_page.len < all_books.len,
+                };
+
+                const json = try self.searchAllToJson(clippings_page, clippings_meta, books_page, books_meta);
+                defer self.allocator.free(json);
+                try self.sendJson(stream, json);
+            },
+        }
+    }
+
     fn sendJson(self: *Server, stream: std.net.Stream, json: []const u8) !void {
         _ = self;
         var response_buf: [256]u8 = undefined;
@@ -163,6 +254,17 @@ pub const Server = struct {
         _ = self;
         const response = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         _ = try stream.write(response);
+    }
+
+    fn sendBadRequest(self: *Server, stream: std.net.Stream, message: []const u8) !void {
+        _ = self;
+        var response_buf: [512]u8 = undefined;
+        const body_fmt = "{{\"error\":\"{s}\"}}";
+        var body_buf: [256]u8 = undefined;
+        const body = std.fmt.bufPrint(&body_buf, body_fmt, .{message}) catch message;
+        const header = std.fmt.bufPrint(&response_buf, "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{body.len}) catch unreachable;
+        _ = try stream.write(header);
+        _ = try stream.write(body);
     }
 
     fn clippingsToJsonPaged(self: *Server, clippings: []const Clipping, meta: PageMeta) ![]u8 {
@@ -193,6 +295,29 @@ pub const Server = struct {
         try writer.writeAll("],\"meta\":");
         try writePageMeta(writer, meta);
         try writer.writeByte('}');
+
+        return json.toOwnedSlice(self.allocator);
+    }
+
+    fn searchAllToJson(self: *Server, clippings: []const Clipping, clippings_meta: PageMeta, books: []const Book, books_meta: PageMeta) ![]u8 {
+        var json: std.ArrayListUnmanaged(u8) = .empty;
+        var writer = json.writer(self.allocator);
+
+        try writer.writeAll("{\"clippings\":{\"data\":[");
+        for (clippings, 0..) |clipping, i| {
+            if (i > 0) try writer.writeByte(',');
+            try self.writeClippingJson(writer, clipping);
+        }
+        try writer.writeAll("],\"meta\":");
+        try writePageMeta(writer, clippings_meta);
+        try writer.writeAll("},\"books\":{\"data\":[");
+        for (books, 0..) |book, i| {
+            if (i > 0) try writer.writeByte(',');
+            try self.writeBookJson(writer, book);
+        }
+        try writer.writeAll("],\"meta\":");
+        try writePageMeta(writer, books_meta);
+        try writer.writeAll("}}");
 
         return json.toOwnedSlice(self.allocator);
     }
@@ -265,6 +390,68 @@ fn parsePath(full_path: []const u8) []const u8 {
         return full_path[0..idx];
     }
     return full_path;
+}
+
+fn parseSearchParams(full_path: []const u8) SearchParams {
+    var result = SearchParams{
+        .query = null,
+        .search_type = .all,
+        .fields = SearchFields.all(),
+        .pagination = .{ .limit = DEFAULT_LIMIT, .offset = 0 },
+    };
+
+    const query_start = std.mem.indexOf(u8, full_path, "?") orelse return result;
+    const query_string = full_path[query_start + 1 ..];
+
+    var params = std.mem.splitScalar(u8, query_string, '&');
+    while (params.next()) |param| {
+        if (std.mem.indexOf(u8, param, "=")) |eq_idx| {
+            const key = param[0..eq_idx];
+            const value = param[eq_idx + 1 ..];
+
+            if (std.mem.eql(u8, key, "q")) {
+                result.query = value;
+            } else if (std.mem.eql(u8, key, "type")) {
+                if (std.mem.eql(u8, value, "books")) {
+                    result.search_type = .books;
+                } else if (std.mem.eql(u8, value, "clippings")) {
+                    result.search_type = .clippings;
+                } else {
+                    result.search_type = .all;
+                }
+            } else if (std.mem.eql(u8, key, "fields")) {
+                result.fields = parseFieldsParam(value);
+            } else if (std.mem.eql(u8, key, "limit")) {
+                var limit = std.fmt.parseInt(usize, value, 10) catch DEFAULT_LIMIT;
+                if (limit > MAX_LIMIT) limit = MAX_LIMIT;
+                if (limit == 0) limit = DEFAULT_LIMIT;
+                result.pagination.limit = limit;
+            } else if (std.mem.eql(u8, key, "offset")) {
+                result.pagination.offset = std.fmt.parseInt(usize, value, 10) catch 0;
+            }
+        }
+    }
+
+    return result;
+}
+
+fn parseFieldsParam(value: []const u8) SearchFields {
+    var fields = SearchFields{};
+    var parts = std.mem.splitScalar(u8, value, ',');
+    while (parts.next()) |part| {
+        if (std.mem.eql(u8, part, "title")) {
+            fields.title = true;
+        } else if (std.mem.eql(u8, part, "author")) {
+            fields.author = true;
+        } else if (std.mem.eql(u8, part, "text")) {
+            fields.text = true;
+        }
+    }
+    // If no valid fields specified, default to all
+    if (!fields.title and !fields.author and !fields.text) {
+        return SearchFields.all();
+    }
+    return fields;
 }
 
 fn parseQueryParams(full_path: []const u8) Pagination {

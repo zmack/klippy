@@ -104,7 +104,84 @@ pub const Library = struct {
         const indices = self.book_clippings.get(book_id) orelse return 0;
         return indices.len;
     }
+
+    pub const SearchFields = struct {
+        title: bool = false,
+        author: bool = false,
+        text: bool = false,
+
+        pub fn all() SearchFields {
+            return .{ .title = true, .author = true, .text = true };
+        }
+    };
+
+    pub fn searchBooks(self: *const Library, query: []const u8, fields: SearchFields) []const Book {
+        var results: std.ArrayListUnmanaged(Book) = .empty;
+
+        for (self.books) |book| {
+            if (fields.title and containsIgnoreCase(book.title, query)) {
+                results.append(self.allocator, book) catch continue;
+                continue;
+            }
+            if (fields.author and containsIgnoreCase(book.author, query)) {
+                results.append(self.allocator, book) catch continue;
+            }
+        }
+
+        return results.toOwnedSlice(self.allocator) catch &[_]Book{};
+    }
+
+    pub fn searchClippings(self: *const Library, query: []const u8, fields: SearchFields) []const Clipping {
+        var results: std.ArrayListUnmanaged(Clipping) = .empty;
+
+        for (self.clippings) |clipping| {
+            if (fields.text and containsIgnoreCase(clipping.text, query)) {
+                results.append(self.allocator, clipping) catch continue;
+                continue;
+            }
+            if (fields.title or fields.author) {
+                if (self.getBookById(clipping.book_id)) |book| {
+                    if (fields.title and containsIgnoreCase(book.title, query)) {
+                        results.append(self.allocator, clipping) catch continue;
+                        continue;
+                    }
+                    if (fields.author and containsIgnoreCase(book.author, query)) {
+                        results.append(self.allocator, clipping) catch continue;
+                    }
+                }
+            }
+        }
+
+        return results.toOwnedSlice(self.allocator) catch &[_]Clipping{};
+    }
 };
+
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+
+    var i: usize = 0;
+    while (i <= haystack.len - needle.len) : (i += 1) {
+        var match = true;
+        for (needle, 0..) |nc, j| {
+            const hc = haystack[i + j];
+            if (std.ascii.toLower(hc) != std.ascii.toLower(nc)) {
+                match = false;
+                break;
+            }
+        }
+        if (match) return true;
+    }
+    return false;
+}
+
+test "contains ignore case" {
+    try std.testing.expect(containsIgnoreCase("Hello World", "world"));
+    try std.testing.expect(containsIgnoreCase("Hello World", "HELLO"));
+    try std.testing.expect(containsIgnoreCase("Hello World", "lo Wo"));
+    try std.testing.expect(!containsIgnoreCase("Hello World", "xyz"));
+    try std.testing.expect(containsIgnoreCase("Test", ""));
+}
 
 test "library init and query" {
     const allocator = std.testing.allocator;
