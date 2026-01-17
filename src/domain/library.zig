@@ -15,6 +15,23 @@ pub const Library = struct {
     pub fn init(allocator: Allocator, raw_text: []const u8) !Library {
         const result = try parser.parse(allocator, raw_text);
 
+        // Sort clippings by added_at desc
+        std.mem.sort(Clipping, result.clippings, {}, struct {
+            fn cmp(_: void, a: Clipping, b: Clipping) bool {
+                return a.added_at > b.added_at;
+            }
+        }.cmp);
+
+        // Sort books by latest_clipping_at desc, then by id
+        std.mem.sort(Book, result.books, {}, struct {
+            fn cmp(_: void, a: Book, b: Book) bool {
+                if (a.latest_clipping_at != b.latest_clipping_at) {
+                    return a.latest_clipping_at > b.latest_clipping_at;
+                }
+                return std.mem.order(u8, a.id, b.id) == .lt;
+            }
+        }.cmp);
+
         var book_clippings: std.StringHashMapUnmanaged([]usize) = .empty;
 
         for (result.books) |book| {

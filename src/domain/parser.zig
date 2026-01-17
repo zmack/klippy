@@ -22,8 +22,12 @@ pub fn parse(allocator: Allocator, raw: []const u8) !ParseResult {
         if (parseBlock(allocator, trimmed)) |clipping| {
             try clippings.append(allocator, clipping);
 
-            if (!books_map.contains(clipping.book_id)) {
-                const book = try extractBook(allocator, trimmed);
+            if (books_map.getPtr(clipping.book_id)) |book| {
+                if (clipping.added_at > book.latest_clipping_at) {
+                    book.latest_clipping_at = clipping.added_at;
+                }
+            } else {
+                const book = try extractBook(allocator, trimmed, clipping.added_at);
                 try books_map.put(allocator, book.id, book);
             }
         } else |_| {
@@ -78,7 +82,7 @@ fn parseBlock(allocator: Allocator, block: []const u8) !Clipping {
     };
 }
 
-fn extractBook(allocator: Allocator, block: []const u8) !Book {
+fn extractBook(allocator: Allocator, block: []const u8, added_at: i64) !Book {
     var lines = std.mem.splitScalar(u8, block, '\n');
     const title_line = lines.next() orelse return error.MalformedBlock;
 
@@ -89,6 +93,7 @@ fn extractBook(allocator: Allocator, block: []const u8) !Book {
         .id = id,
         .title = title_author.title,
         .author = title_author.author,
+        .latest_clipping_at = added_at,
     };
 }
 

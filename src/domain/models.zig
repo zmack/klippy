@@ -13,4 +13,5 @@ pub const Book = struct {
     id: []const u8,
     title: []const u8,
     author: []const u8,
+    latest_clipping_at: i64,
 };
