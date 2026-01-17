@@ -107,4 +107,3 @@ Highlighted text here
 
 - [ ] Authentication
 - [ ] Search/filter endpoints
-- [ ] ISO 8601 date formatting in JSON

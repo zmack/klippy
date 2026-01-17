@@ -239,8 +239,9 @@ pub const Server = struct {
         } else {
             try writer.writeAll("null");
         }
-        try writer.writeAll(",\"added_at\":");
-        try writer.print("{d}", .{clipping.added_at});
+        try writer.writeAll(",\"added_at\":\"");
+        try writeIso8601(writer, clipping.added_at);
+        try writer.writeByte('"');
         try writer.writeAll(",\"text\":");
         try writeJsonString(writer, clipping.text);
         try writer.writeByte('}');
@@ -313,6 +314,23 @@ fn writePageMeta(writer: anytype, meta: PageMeta) !void {
     try writer.writeByte('}');
 }
 
+fn writeIso8601(writer: anytype, epoch: i64) !void {
+    const epoch_secs = std.time.epoch.EpochSeconds{ .secs = @intCast(epoch) };
+    const epoch_day = epoch_secs.getEpochDay();
+    const year_day = epoch_day.calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const day_secs = epoch_secs.getDaySeconds();
+
+    try writer.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
+        year_day.year,
+        month_day.month.numeric(),
+        month_day.day_index + 1,
+        day_secs.getHoursIntoDay(),
+        day_secs.getMinutesIntoHour(),
+        day_secs.getSecondsIntoMinute(),
+    });
+}
+
 fn writeJsonString(writer: anytype, str: []const u8) !void {
     try writer.writeByte('"');
     for (str) |c| {
@@ -366,4 +384,13 @@ test "paginate" {
 
     const page3 = paginate(u8, &items, .{ .limit = 2, .offset = 10 });
     try std.testing.expectEqual(@as(usize, 0), page3.len);
+}
+
+test "write iso8601" {
+    var buf: [32]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const writer = fbs.writer();
+
+    try writeIso8601(writer, 1655163452);
+    try std.testing.expectEqualStrings("2022-06-13T23:37:32Z", fbs.getWritten());
 }
