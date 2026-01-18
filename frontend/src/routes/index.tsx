@@ -30,67 +30,78 @@ function HomePage() {
 
   return (
     <div>
-      <h1>Books</h1>
+      <h1 className="page-title">Your Library</h1>
+      <p className="page-subtitle">Highlights and notes from your reading</p>
 
-      <form onSubmit={handleSearch} style={{ marginBottom: '1rem' }}>
+      <form onSubmit={handleSearch} className="search-form">
         <input
           type="text"
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
-          placeholder="Search books..."
-          style={{ padding: '0.5rem', width: '300px', marginRight: '0.5rem' }}
+          placeholder="Search your books..."
+          className="search-input"
         />
-        <button type="submit" style={{ padding: '0.5rem 1rem' }}>Search</button>
+        <button type="submit" className="btn btn-primary">Search</button>
         {searchQuery && (
           <button
             type="button"
             onClick={() => { setSearchQuery(''); setOffset(0); }}
-            style={{ padding: '0.5rem 1rem', marginLeft: '0.5rem' }}
+            className="btn btn-secondary"
           >
             Clear
           </button>
         )}
       </form>
 
-      {booksQuery.isLoading && <p>Loading...</p>}
-      {booksQuery.isError && <p>Error: {booksQuery.error.message}</p>}
+      {booksQuery.isLoading && <p className="loading">Gathering your books...</p>}
+      {booksQuery.isError && <p className="error">Error: {booksQuery.error.message}</p>}
       {booksQuery.data && (
         <>
-          <p style={{ color: '#666', marginBottom: '1rem' }}>
+          <p className="results-summary">
             Showing {booksQuery.data.data.length} of {booksQuery.data.meta.total} books
           </p>
 
-          <ul style={{ listStyle: 'none', padding: 0 }}>
-            {booksQuery.data.data.map((book) => (
-              <li key={book.id} style={{ borderBottom: '1px solid #eee', padding: '1rem 0' }}>
-                <Link
-                  to="/books/$bookId"
-                  params={{ bookId: book.id }}
-                  style={{ textDecoration: 'none', color: 'inherit' }}
-                >
-                  <h3 style={{ margin: '0 0 0.25rem 0' }}>{book.title}</h3>
-                  <p style={{ margin: 0, color: '#666' }}>
-                    by {book.author} &middot; {book.clipping_count} clipping{book.clipping_count !== 1 ? 's' : ''}
-                  </p>
-                </Link>
-              </li>
-            ))}
-          </ul>
+          {booksQuery.data.data.length === 0 ? (
+            <div className="empty-state">
+              <div className="empty-state-icon">📖</div>
+              <p>No books found</p>
+            </div>
+          ) : (
+            <ul className="book-list">
+              {booksQuery.data.data.map((book) => (
+                <li key={book.id} className="book-card">
+                  <Link
+                    to="/books/$bookId"
+                    params={{ bookId: book.id }}
+                    className="book-card-link"
+                  >
+                    <h3 className="book-title">{book.title}</h3>
+                    <p className="book-author">by {book.author}</p>
+                    <div className="book-meta">
+                      <span className="clipping-count">
+                        ✂️ {book.clipping_count} clipping{book.clipping_count !== 1 ? 's' : ''}
+                      </span>
+                    </div>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          )}
 
-          <div style={{ marginTop: '1rem', display: 'flex', gap: '1rem' }}>
+          <div className="pagination">
             <button
               onClick={() => setOffset(Math.max(0, offset - limit))}
               disabled={offset === 0}
-              style={{ padding: '0.5rem 1rem' }}
+              className="btn btn-secondary"
             >
-              Previous
+              ← Previous
             </button>
             <button
               onClick={() => setOffset(offset + limit)}
               disabled={!booksQuery.data.meta.has_more}
-              style={{ padding: '0.5rem 1rem' }}
+              className="btn btn-secondary"
             >
-              Next
+              Next →
             </button>
           </div>
         </>
