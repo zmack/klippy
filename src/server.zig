@@ -164,8 +164,62 @@ pub const Server = struct {
     }
 
     fn handleGetAsset(self: *Server, request: *Request, filename: []const u8) !void {
-        _ = filename;
-        try self.sendNotFound(request);
+        _ = self;
+
+        // Validate path to prevent directory traversal
+        if (!isValidAssetPath(filename)) {
+            try request.respond("", .{ .status = .not_found, .keep_alive = false });
+            return;
+        }
+
+        // Build path: public/{filename}
+        var path_buf: [512]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "public/{s}", .{filename}) catch {
+            try request.respond("", .{ .status = .not_found, .keep_alive = false });
+            return;
+        };
+
+        // Open file
+        const file = std.fs.cwd().openFile(path, .{}) catch {
+            try request.respond("", .{ .status = .not_found, .keep_alive = false });
+            return;
+        };
+        defer file.close();
+
+        // Get file size for Content-Length
+        const stat = file.stat() catch {
+            try request.respond("", .{ .status = .not_found, .keep_alive = false });
+            return;
+        };
+
+        // Start streaming response with content-length
+        const mime_type = getMimeType(filename);
+        var response_buf: [8192]u8 = undefined;
+        var response = request.respondStreaming(&response_buf, .{
+            .content_length = stat.size,
+            .respond_options = .{
+                .status = .ok,
+                .keep_alive = false,
+                .extra_headers = &[_]std.http.Header{
+                    .{ .name = "content-type", .value = mime_type },
+                },
+            },
+        }) catch {
+            return;
+        };
+
+        // Stream file content in chunks
+        var buf: [8192]u8 = undefined;
+        while (true) {
+            const bytes_read = file.read(&buf) catch {
+                return;
+            };
+            if (bytes_read == 0) break;
+            response.writer.writeAll(buf[0..bytes_read]) catch {
+                return;
+            };
+        }
+        response.end() catch {};
     }
 
     fn handleSearch(self: *Server, request: *Request, params: SearchParams) !void {
@@ -393,6 +447,30 @@ pub const Server = struct {
         try writer.writeByte('}');
     }
 };
+
+fn getMimeType(filename: []const u8) []const u8 {
+    const ext = std.fs.path.extension(filename);
+    if (std.mem.eql(u8, ext, ".html")) return "text/html";
+    if (std.mem.eql(u8, ext, ".css")) return "text/css";
+    if (std.mem.eql(u8, ext, ".js")) return "application/javascript";
+    if (std.mem.eql(u8, ext, ".json")) return "application/json";
+    if (std.mem.eql(u8, ext, ".png")) return "image/png";
+    if (std.mem.eql(u8, ext, ".jpg") or std.mem.eql(u8, ext, ".jpeg")) return "image/jpeg";
+    if (std.mem.eql(u8, ext, ".gif")) return "image/gif";
+    if (std.mem.eql(u8, ext, ".svg")) return "image/svg+xml";
+    if (std.mem.eql(u8, ext, ".ico")) return "image/x-icon";
+    if (std.mem.eql(u8, ext, ".woff")) return "font/woff";
+    if (std.mem.eql(u8, ext, ".woff2")) return "font/woff2";
+    if (std.mem.eql(u8, ext, ".txt")) return "text/plain";
+    return "application/octet-stream";
+}
+
+fn isValidAssetPath(filename: []const u8) bool {
+    if (filename.len == 0) return false;
+    if (filename[0] == '/') return false;
+    if (std.mem.indexOf(u8, filename, "..") != null) return false;
+    return true;
+}
 
 fn parsePath(full_path: []const u8) []const u8 {
     if (std.mem.indexOf(u8, full_path, "?")) |idx| {
