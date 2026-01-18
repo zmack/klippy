@@ -6,6 +6,7 @@ const Book = domain.Book;
 const SearchFields = domain.SearchFields;
 
 const Allocator = std.mem.Allocator;
+const Request = std.http.Server.Request;
 
 const DEFAULT_LIMIT: usize = 20;
 const MAX_LIMIT: usize = 100;
@@ -75,41 +76,41 @@ pub const Server = struct {
 
     fn handleConnection(self: *Server, conn: std.net.Server.Connection) !void {
         var read_buffer: [8192]u8 = undefined;
-        const bytes_read = try conn.stream.read(&read_buffer);
-        if (bytes_read == 0) return;
+        var write_buffer: [8192]u8 = undefined;
 
-        const request = read_buffer[0..bytes_read];
-        const first_line_end = std.mem.indexOf(u8, request, "\r\n") orelse return;
-        const first_line = request[0..first_line_end];
+        var stream_reader = conn.stream.reader(&read_buffer);
+        var stream_writer = conn.stream.writer(&write_buffer);
+        var http_server = std.http.Server.init(stream_reader.interface(), &stream_writer.interface);
+        var request = try http_server.receiveHead();
 
-        var parts = std.mem.splitScalar(u8, first_line, ' ');
-        const method = parts.next() orelse return;
-        const full_path = parts.next() orelse return;
-
-        if (!std.mem.eql(u8, method, "GET")) {
-            try self.sendMethodNotAllowed(conn.stream);
+        if (request.head.method != .GET) {
+            try self.sendMethodNotAllowed(&request);
             return;
         }
 
+        const full_path = request.head.target;
         const path = parsePath(full_path);
-        const pagination = parseQueryParams(full_path);
+        const pagination = parseQueryParams(path);
 
         if (std.mem.eql(u8, path, "/clippings")) {
-            try self.handleGetClippings(conn.stream, pagination);
+            try self.handleGetClippings(&request, pagination);
         } else if (std.mem.eql(u8, path, "/books")) {
-            try self.handleGetBooks(conn.stream, pagination);
+            try self.handleGetBooks(&request, pagination);
         } else if (std.mem.startsWith(u8, path, "/books/")) {
             const book_id = path[7..];
-            try self.handleGetBook(conn.stream, book_id, pagination);
+            try self.handleGetBook(&request, book_id, pagination);
         } else if (std.mem.eql(u8, path, "/search")) {
             const search_params = parseSearchParams(full_path);
-            try self.handleSearch(conn.stream, search_params);
+            try self.handleSearch(&request, search_params);
+        } else if (std.mem.startsWith(u8, path, "/assets/")) {
+            const filename = path[8..];
+            try self.handleGetAsset(&request, filename);
         } else {
-            try self.sendNotFound(conn.stream);
+            try self.sendNotFound(&request);
         }
     }
 
-    fn handleGetClippings(self: *Server, stream: std.net.Stream, pagination: Pagination) !void {
+    fn handleGetClippings(self: *Server, request: *Request, pagination: Pagination) !void {
         const all_clippings = self.library.getAllClippings();
         const page = paginate(Clipping, all_clippings, pagination);
         const meta = PageMeta{
@@ -121,10 +122,10 @@ pub const Server = struct {
 
         const json = try self.clippingsToJsonPaged(page, meta);
         defer self.allocator.free(json);
-        try self.sendJson(stream, json);
+        try self.sendJson(request, json);
     }
 
-    fn handleGetBooks(self: *Server, stream: std.net.Stream, pagination: Pagination) !void {
+    fn handleGetBooks(self: *Server, request: *Request, pagination: Pagination) !void {
         const all_books = self.library.getBooks();
         const page = paginate(Book, all_books, pagination);
         const meta = PageMeta{
@@ -136,12 +137,12 @@ pub const Server = struct {
 
         const json = try self.booksToJsonPaged(page, meta);
         defer self.allocator.free(json);
-        try self.sendJson(stream, json);
+        try self.sendJson(request, json);
     }
 
-    fn handleGetBook(self: *Server, stream: std.net.Stream, book_id: []const u8, pagination: Pagination) !void {
+    fn handleGetBook(self: *Server, request: *Request, book_id: []const u8, pagination: Pagination) !void {
         const book = self.library.getBookById(book_id) orelse {
-            try self.sendNotFound(stream);
+            try self.sendNotFound(request);
             return;
         };
 
@@ -159,12 +160,17 @@ pub const Server = struct {
 
         const json = try self.bookWithClippingsToJsonPaged(book, page, meta);
         defer self.allocator.free(json);
-        try self.sendJson(stream, json);
+        try self.sendJson(request, json);
     }
 
-    fn handleSearch(self: *Server, stream: std.net.Stream, params: SearchParams) !void {
+    fn handleGetAsset(self: *Server, request: *Request, filename: []const u8) !void {
+        _ = filename;
+        try self.sendNotFound(request);
+    }
+
+    fn handleSearch(self: *Server, request: *Request, params: SearchParams) !void {
         const query = params.query orelse {
-            try self.sendBadRequest(stream, "Missing required parameter: q");
+            try self.sendBadRequest(request, "Missing required parameter: q");
             return;
         };
 
@@ -181,7 +187,7 @@ pub const Server = struct {
                 };
                 const json = try self.clippingsToJsonPaged(page, meta);
                 defer self.allocator.free(json);
-                try self.sendJson(stream, json);
+                try self.sendJson(request, json);
             },
             .books => {
                 const all_results = self.library.searchBooks(query, params.fields);
@@ -195,7 +201,7 @@ pub const Server = struct {
                 };
                 const json = try self.booksToJsonPaged(page, meta);
                 defer self.allocator.free(json);
-                try self.sendJson(stream, json);
+                try self.sendJson(request, json);
             },
             .all => {
                 const all_clippings = self.library.searchClippings(query, params.fields);
@@ -231,40 +237,43 @@ pub const Server = struct {
 
                 const json = try self.searchAllToJson(clippings_page, clippings_meta, books_page, books_meta);
                 defer self.allocator.free(json);
-                try self.sendJson(stream, json);
+                try self.sendJson(request, json);
             },
         }
     }
 
-    fn sendJson(self: *Server, stream: std.net.Stream, json: []const u8) !void {
+    fn sendJson(self: *Server, request: *Request, json: []const u8) !void {
         _ = self;
-        var response_buf: [256]u8 = undefined;
-        const header = std.fmt.bufPrint(&response_buf, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{json.len}) catch unreachable;
-        _ = try stream.write(header);
-        _ = try stream.write(json);
+        try request.respond(json, .{
+            .status = .ok,
+            .keep_alive = false,
+            .extra_headers = &[_]std.http.Header{
+                .{ .name = "content-type", .value = "application/json" },
+            },
+        });
     }
 
-    fn sendNotFound(self: *Server, stream: std.net.Stream) !void {
+    fn sendNotFound(self: *Server, request: *Request) !void {
         _ = self;
-        const response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-        _ = try stream.write(response);
+        try request.respond("", .{ .status = .not_found, .keep_alive = false });
     }
 
-    fn sendMethodNotAllowed(self: *Server, stream: std.net.Stream) !void {
+    fn sendMethodNotAllowed(self: *Server, request: *Request) !void {
         _ = self;
-        const response = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-        _ = try stream.write(response);
+        try request.respond("", .{ .status = .method_not_allowed, .keep_alive = false });
     }
 
-    fn sendBadRequest(self: *Server, stream: std.net.Stream, message: []const u8) !void {
+    fn sendBadRequest(self: *Server, request: *Request, message: []const u8) !void {
         _ = self;
-        var response_buf: [512]u8 = undefined;
-        const body_fmt = "{{\"error\":\"{s}\"}}";
         var body_buf: [256]u8 = undefined;
-        const body = std.fmt.bufPrint(&body_buf, body_fmt, .{message}) catch message;
-        const header = std.fmt.bufPrint(&response_buf, "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{body.len}) catch unreachable;
-        _ = try stream.write(header);
-        _ = try stream.write(body);
+        const body = std.fmt.bufPrint(&body_buf, "{{\"error\":\"{s}\"}}", .{message}) catch message;
+        try request.respond(body, .{
+            .status = .bad_request,
+            .keep_alive = false,
+            .extra_headers = &[_]std.http.Header{
+                .{ .name = "content-type", .value = "application/json" },
+            },
+        });
     }
 
     fn clippingsToJsonPaged(self: *Server, clippings: []const Clipping, meta: PageMeta) ![]u8 {
