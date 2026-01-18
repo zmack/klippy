@@ -105,6 +105,11 @@ pub const Server = struct {
         } else if (std.mem.startsWith(u8, path, "/assets/")) {
             const filename = path[8..];
             try self.handleGetAsset(&request, filename);
+        } else if (std.mem.eql(u8, path, "/") or
+            std.mem.eql(u8, path, "/index.html") or
+            std.mem.eql(u8, path, "/index.htm"))
+        {
+            try self.handleGetAsset(&request, "index.html");
         } else {
             try self.sendNotFound(&request);
         }
