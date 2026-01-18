@@ -1,2 +1,22 @@
+# Zig
 .zig-cache
 zig-out
+
+# Frontend
+frontend/node_modules
+frontend/src/routeTree.gen.ts
+
+# Build output
+public/assets
+public/index.html
+
+# Editor/OS
+.DS_Store
+*.swp
+*.swo
+.idea
+.vscode
+
+# Logs
+*.log
+npm-debug.log*
