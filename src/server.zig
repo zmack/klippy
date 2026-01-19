@@ -36,10 +36,47 @@ const SearchParams = struct {
     pagination: Pagination,
 };
 
+const RequestContext = struct {
+    request: *Request,
+    full_path: []const u8,
+    path: []const u8,
+
+    pub fn pathSuffix(self: RequestContext, prefix: []const u8) []const u8 {
+        return self.path[prefix.len..];
+    }
+
+    pub fn getPagination(self: RequestContext) Pagination {
+        return parseQueryParams(self.full_path);
+    }
+
+    pub fn getSearchParams(self: RequestContext) SearchParams {
+        return parseSearchParams(self.full_path);
+    }
+};
+
 pub const Server = struct {
     allocator: Allocator,
     library: *const Library,
     tcp_server: std.net.Server,
+
+    const Route = struct {
+        path: []const u8,
+        match: MatchType,
+        handler: *const fn (*Server, RequestContext) anyerror!void,
+
+        const MatchType = enum { exact, prefix };
+    };
+
+    const routes = [_]Route{
+        .{ .path = "/clippings", .match = .exact, .handler = handleGetClippings },
+        .{ .path = "/books/", .match = .prefix, .handler = handleGetBook },
+        .{ .path = "/books", .match = .exact, .handler = handleGetBooks },
+        .{ .path = "/search", .match = .exact, .handler = handleSearch },
+        .{ .path = "/assets/", .match = .prefix, .handler = handleGetAsset },
+        .{ .path = "/", .match = .exact, .handler = handleIndex },
+        .{ .path = "/index.html", .match = .exact, .handler = handleIndex },
+        .{ .path = "/index.htm", .match = .exact, .handler = handleIndex },
+    };
 
     pub fn init(allocator: Allocator, library: *const Library, port: u16) !Server {
         const address = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
@@ -88,66 +125,52 @@ pub const Server = struct {
             return;
         }
 
-        const full_path = request.head.target;
-        const path = parsePath(full_path);
-        const pagination = parseQueryParams(path);
+        const ctx = RequestContext{
+            .request = &request,
+            .full_path = request.head.target,
+            .path = parsePath(request.head.target),
+        };
 
-        if (std.mem.eql(u8, path, "/clippings")) {
-            try self.handleGetClippings(&request, pagination);
-        } else if (std.mem.eql(u8, path, "/books")) {
-            try self.handleGetBooks(&request, pagination);
-        } else if (std.mem.startsWith(u8, path, "/books/")) {
-            const book_id = path[7..];
-            try self.handleGetBook(&request, book_id, pagination);
-        } else if (std.mem.eql(u8, path, "/search")) {
-            const search_params = parseSearchParams(full_path);
-            try self.handleSearch(&request, search_params);
-        } else if (std.mem.startsWith(u8, path, "/assets/")) {
-            const filename = path[8..];
-            try self.handleGetAsset(&request, filename);
-        } else if (std.mem.eql(u8, path, "/") or
-            std.mem.eql(u8, path, "/index.html") or
-            std.mem.eql(u8, path, "/index.htm"))
-        {
-            try self.handleGetAsset(&request, "index.html");
-        } else {
-            try self.sendNotFound(&request);
+        try self.route(ctx);
+    }
+
+    fn route(self: *Server, ctx: RequestContext) !void {
+        for (routes) |r| {
+            const matched = switch (r.match) {
+                .exact => std.mem.eql(u8, ctx.path, r.path),
+                .prefix => std.mem.startsWith(u8, ctx.path, r.path),
+            };
+            if (matched) {
+                try r.handler(self, ctx);
+                return;
+            }
         }
+        try self.sendNotFound(ctx.request);
     }
 
-    fn handleGetClippings(self: *Server, request: *Request, pagination: Pagination) !void {
+    fn handleGetClippings(self: *Server, ctx: RequestContext) !void {
         const all_clippings = self.library.getAllClippings();
-        const page = paginate(Clipping, all_clippings, pagination);
-        const meta = PageMeta{
-            .total = all_clippings.len,
-            .limit = pagination.limit,
-            .offset = pagination.offset,
-            .has_more = pagination.offset + page.len < all_clippings.len,
-        };
+        const result = paginateWithMeta(all_clippings, ctx.getPagination());
 
-        const json = try self.clippingsToJsonPaged(page, meta);
+        const json = try self.clippingsToJsonPaged(result.page, result.meta);
         defer self.allocator.free(json);
-        try self.sendJson(request, json);
+        try self.sendJson(ctx.request, json);
     }
 
-    fn handleGetBooks(self: *Server, request: *Request, pagination: Pagination) !void {
+    fn handleGetBooks(self: *Server, ctx: RequestContext) !void {
         const all_books = self.library.getBooks();
-        const page = paginate(Book, all_books, pagination);
-        const meta = PageMeta{
-            .total = all_books.len,
-            .limit = pagination.limit,
-            .offset = pagination.offset,
-            .has_more = pagination.offset + page.len < all_books.len,
-        };
+        const result = paginateWithMeta(all_books, ctx.getPagination());
 
-        const json = try self.booksToJsonPaged(page, meta);
+        const json = try self.booksToJsonPaged(result.page, result.meta);
         defer self.allocator.free(json);
-        try self.sendJson(request, json);
+        try self.sendJson(ctx.request, json);
     }
 
-    fn handleGetBook(self: *Server, request: *Request, book_id: []const u8, pagination: Pagination) !void {
+    fn handleGetBook(self: *Server, ctx: RequestContext) !void {
+        const book_id = ctx.pathSuffix("/books/");
+
         const book = self.library.getBookById(book_id) orelse {
-            try self.sendNotFound(request);
+            try self.sendNotFound(ctx.request);
             return;
         };
 
@@ -155,52 +178,47 @@ pub const Server = struct {
         defer if (all_clippings) |c| self.allocator.free(c);
 
         const clippings = all_clippings orelse &[_]Clipping{};
-        const page = paginate(Clipping, clippings, pagination);
-        const meta = PageMeta{
-            .total = clippings.len,
-            .limit = pagination.limit,
-            .offset = pagination.offset,
-            .has_more = pagination.offset + page.len < clippings.len,
-        };
+        const result = paginateWithMeta(clippings, ctx.getPagination());
 
-        const json = try self.bookWithClippingsToJsonPaged(book, page, meta);
+        const json = try self.bookWithClippingsToJsonPaged(book, result.page, result.meta);
         defer self.allocator.free(json);
-        try self.sendJson(request, json);
+        try self.sendJson(ctx.request, json);
     }
 
-    fn handleGetAsset(self: *Server, request: *Request, filename: []const u8) !void {
+    fn handleGetAsset(self: *Server, ctx: RequestContext) !void {
         _ = self;
+        const filename = ctx.pathSuffix("/assets/");
 
         // Validate path to prevent directory traversal
         if (!isValidAssetPath(filename)) {
-            try request.respond("", .{ .status = .not_found, .keep_alive = false });
+            try ctx.request.respond("", .{ .status = .not_found, .keep_alive = false });
             return;
         }
 
         // Build path: public/{filename}
         var path_buf: [512]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "public/{s}", .{filename}) catch {
-            try request.respond("", .{ .status = .not_found, .keep_alive = false });
+            try ctx.request.respond("", .{ .status = .not_found, .keep_alive = false });
             return;
         };
 
         // Open file
         const file = std.fs.cwd().openFile(path, .{}) catch {
-            try request.respond("", .{ .status = .not_found, .keep_alive = false });
+            try ctx.request.respond("", .{ .status = .not_found, .keep_alive = false });
             return;
         };
         defer file.close();
 
         // Get file size for Content-Length
         const stat = file.stat() catch {
-            try request.respond("", .{ .status = .not_found, .keep_alive = false });
+            try ctx.request.respond("", .{ .status = .not_found, .keep_alive = false });
             return;
         };
 
         // Start streaming response with content-length
         const mime_type = getMimeType(filename);
         var response_buf: [8192]u8 = undefined;
-        var response = request.respondStreaming(&response_buf, .{
+        var response = ctx.request.respondStreaming(&response_buf, .{
             .content_length = stat.size,
             .respond_options = .{
                 .status = .ok,
@@ -227,9 +245,10 @@ pub const Server = struct {
         response.end() catch {};
     }
 
-    fn handleSearch(self: *Server, request: *Request, params: SearchParams) !void {
+    fn handleSearch(self: *Server, ctx: RequestContext) !void {
+        const params = ctx.getSearchParams();
         const query = params.query orelse {
-            try self.sendBadRequest(request, "Missing required parameter: q");
+            try self.sendBadRequest(ctx.request, "Missing required parameter: q");
             return;
         };
 
@@ -237,30 +256,18 @@ pub const Server = struct {
             .clippings => {
                 const all_results = self.library.searchClippings(query, params.fields);
                 defer self.allocator.free(all_results);
-                const page = paginate(Clipping, all_results, params.pagination);
-                const meta = PageMeta{
-                    .total = all_results.len,
-                    .limit = params.pagination.limit,
-                    .offset = params.pagination.offset,
-                    .has_more = params.pagination.offset + page.len < all_results.len,
-                };
-                const json = try self.clippingsToJsonPaged(page, meta);
+                const result = paginateWithMeta(all_results, params.pagination);
+                const json = try self.clippingsToJsonPaged(result.page, result.meta);
                 defer self.allocator.free(json);
-                try self.sendJson(request, json);
+                try self.sendJson(ctx.request, json);
             },
             .books => {
                 const all_results = self.library.searchBooks(query, params.fields);
                 defer self.allocator.free(all_results);
-                const page = paginate(Book, all_results, params.pagination);
-                const meta = PageMeta{
-                    .total = all_results.len,
-                    .limit = params.pagination.limit,
-                    .offset = params.pagination.offset,
-                    .has_more = params.pagination.offset + page.len < all_results.len,
-                };
-                const json = try self.booksToJsonPaged(page, meta);
+                const result = paginateWithMeta(all_results, params.pagination);
+                const json = try self.booksToJsonPaged(result.page, result.meta);
                 defer self.allocator.free(json);
-                try self.sendJson(request, json);
+                try self.sendJson(ctx.request, json);
             },
             .all => {
                 const all_clippings = self.library.searchClippings(query, params.fields);
@@ -272,33 +279,61 @@ pub const Server = struct {
                 const clippings_limit = @min(params.pagination.limit, all_clippings.len);
                 const books_limit = params.pagination.limit -| clippings_limit;
 
-                const clippings_page = paginate(Clipping, all_clippings, .{
+                const clippings_result = paginateWithMeta(all_clippings, .{
                     .limit = clippings_limit,
                     .offset = params.pagination.offset,
                 });
-                const clippings_meta = PageMeta{
-                    .total = all_clippings.len,
-                    .limit = clippings_limit,
-                    .offset = params.pagination.offset,
-                    .has_more = params.pagination.offset + clippings_page.len < all_clippings.len,
-                };
-
-                const books_page = paginate(Book, all_books, .{
+                const books_result = paginateWithMeta(all_books, .{
                     .limit = books_limit,
                     .offset = 0,
                 });
-                const books_meta = PageMeta{
-                    .total = all_books.len,
-                    .limit = books_limit,
-                    .offset = 0,
-                    .has_more = books_page.len < all_books.len,
-                };
 
-                const json = try self.searchAllToJson(clippings_page, clippings_meta, books_page, books_meta);
+                const json = try self.searchAllToJson(clippings_result.page, clippings_result.meta, books_result.page, books_result.meta);
                 defer self.allocator.free(json);
-                try self.sendJson(request, json);
+                try self.sendJson(ctx.request, json);
             },
         }
+    }
+
+    fn handleIndex(self: *Server, ctx: RequestContext) !void {
+        _ = self;
+
+        const file = std.fs.cwd().openFile("public/index.html", .{}) catch {
+            try ctx.request.respond("", .{ .status = .not_found, .keep_alive = false });
+            return;
+        };
+        defer file.close();
+
+        const stat = file.stat() catch {
+            try ctx.request.respond("", .{ .status = .not_found, .keep_alive = false });
+            return;
+        };
+
+        var response_buf: [8192]u8 = undefined;
+        var response = ctx.request.respondStreaming(&response_buf, .{
+            .content_length = stat.size,
+            .respond_options = .{
+                .status = .ok,
+                .keep_alive = false,
+                .extra_headers = &[_]std.http.Header{
+                    .{ .name = "content-type", .value = "text/html" },
+                },
+            },
+        }) catch {
+            return;
+        };
+
+        var buf: [8192]u8 = undefined;
+        while (true) {
+            const bytes_read = file.read(&buf) catch {
+                return;
+            };
+            if (bytes_read == 0) break;
+            response.writer.writeAll(buf[0..bytes_read]) catch {
+                return;
+            };
+        }
+        response.end() catch {};
     }
 
     fn sendJson(self: *Server, request: *Request, json: []const u8) !void {
@@ -572,13 +607,26 @@ fn parseQueryParams(full_path: []const u8) Pagination {
     return .{ .limit = limit, .offset = offset };
 }
 
-fn paginate(comptime T: type, items: []const T, pagination: Pagination) []const T {
+fn paginate(items: anytype, pagination: Pagination) @TypeOf(items) {
     if (pagination.offset >= items.len) {
-        return &[_]T{};
+        return items[0..0];
     }
     const start = pagination.offset;
     const end = @min(pagination.offset + pagination.limit, items.len);
     return items[start..end];
+}
+
+fn paginateWithMeta(items: anytype, pagination: Pagination) struct { page: @TypeOf(items), meta: PageMeta } {
+    const page = paginate(items, pagination);
+    return .{
+        .page = page,
+        .meta = PageMeta{
+            .total = items.len,
+            .limit = pagination.limit,
+            .offset = pagination.offset,
+            .has_more = pagination.offset + page.len < items.len,
+        },
+    };
 }
 
 fn writePageMeta(writer: anytype, meta: PageMeta) !void {
@@ -655,13 +703,13 @@ test "parse path" {
 
 test "paginate" {
     const items = [_]u8{ 1, 2, 3, 4, 5 };
-    const page1 = paginate(u8, &items, .{ .limit = 2, .offset = 0 });
+    const page1 = paginate(&items, .{ .limit = 2, .offset = 0 });
     try std.testing.expectEqual(@as(usize, 2), page1.len);
 
-    const page2 = paginate(u8, &items, .{ .limit = 2, .offset = 2 });
+    const page2 = paginate(&items, .{ .limit = 2, .offset = 2 });
     try std.testing.expectEqual(@as(usize, 2), page2.len);
 
-    const page3 = paginate(u8, &items, .{ .limit = 2, .offset = 10 });
+    const page3 = paginate(&items, .{ .limit = 2, .offset = 10 });
     try std.testing.expectEqual(@as(usize, 0), page3.len);
 }
 
