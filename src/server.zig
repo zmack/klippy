@@ -152,7 +152,7 @@ pub const Server = struct {
         const all_clippings = self.library.getAllClippings();
         const result = paginateWithMeta(all_clippings, ctx.getPagination());
 
-        const json = try self.clippingsToJsonPaged(result.page, result.meta);
+        const json = try self.toJsonPaged(result.page, result.meta, writeClippingJson);
         defer self.allocator.free(json);
         try self.sendJson(ctx.request, json);
     }
@@ -161,7 +161,7 @@ pub const Server = struct {
         const all_books = self.library.getBooks();
         const result = paginateWithMeta(all_books, ctx.getPagination());
 
-        const json = try self.booksToJsonPaged(result.page, result.meta);
+        const json = try self.toJsonPaged(result.page, result.meta, writeBookJson);
         defer self.allocator.free(json);
         try self.sendJson(ctx.request, json);
     }
@@ -257,7 +257,7 @@ pub const Server = struct {
                 const all_results = self.library.searchClippings(query, params.fields);
                 defer self.allocator.free(all_results);
                 const result = paginateWithMeta(all_results, params.pagination);
-                const json = try self.clippingsToJsonPaged(result.page, result.meta);
+                const json = try self.toJsonPaged(result.page, result.meta, writeClippingJson);
                 defer self.allocator.free(json);
                 try self.sendJson(ctx.request, json);
             },
@@ -265,7 +265,7 @@ pub const Server = struct {
                 const all_results = self.library.searchBooks(query, params.fields);
                 defer self.allocator.free(all_results);
                 const result = paginateWithMeta(all_results, params.pagination);
-                const json = try self.booksToJsonPaged(result.page, result.meta);
+                const json = try self.toJsonPaged(result.page, result.meta, writeBookJson);
                 defer self.allocator.free(json);
                 try self.sendJson(ctx.request, json);
             },
@@ -370,30 +370,19 @@ pub const Server = struct {
         });
     }
 
-    fn clippingsToJsonPaged(self: *Server, clippings: []const Clipping, meta: PageMeta) ![]u8 {
+    fn toJsonPaged(
+        self: *Server,
+        items: anytype,
+        meta: PageMeta,
+        comptime writeItemFn: fn (*Server, anytype, std.meta.Elem(@TypeOf(items))) anyerror!void,
+    ) ![]u8 {
         var json: std.ArrayListUnmanaged(u8) = .empty;
         var writer = json.writer(self.allocator);
 
         try writer.writeAll("{\"data\":[");
-        for (clippings, 0..) |clipping, i| {
+        for (items, 0..) |item, i| {
             if (i > 0) try writer.writeByte(',');
-            try self.writeClippingJson(writer, clipping);
-        }
-        try writer.writeAll("],\"meta\":");
-        try writePageMeta(writer, meta);
-        try writer.writeByte('}');
-
-        return json.toOwnedSlice(self.allocator);
-    }
-
-    fn booksToJsonPaged(self: *Server, books: []const Book, meta: PageMeta) ![]u8 {
-        var json: std.ArrayListUnmanaged(u8) = .empty;
-        var writer = json.writer(self.allocator);
-
-        try writer.writeAll("{\"data\":[");
-        for (books, 0..) |book, i| {
-            if (i > 0) try writer.writeByte(',');
-            try self.writeBookJson(writer, book);
+            try writeItemFn(self, writer, item);
         }
         try writer.writeAll("],\"meta\":");
         try writePageMeta(writer, meta);
