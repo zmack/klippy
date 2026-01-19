@@ -2,7 +2,10 @@ const std = @import("std");
 const domain = @import("domain.zig");
 const Library = domain.Library;
 const Clipping = domain.Clipping;
+const ClippingJson = domain.ClippingJson;
 const Book = domain.Book;
+const BookJson = domain.BookJson;
+const Iso8601 = domain.Iso8601;
 const SearchFields = domain.SearchFields;
 
 const Allocator = std.mem.Allocator;
@@ -22,6 +25,50 @@ const PageMeta = struct {
     offset: usize,
     has_more: bool,
 };
+
+fn PagedJson(comptime T: type) type {
+    return struct {
+        data: []const T,
+        meta: PageMeta,
+    };
+}
+
+const BookDetailJson = struct {
+    id: []const u8,
+    title: []const u8,
+    author: []const u8,
+    clippings: []const ClippingJson,
+    meta: PageMeta,
+};
+
+const SearchAllJson = struct {
+    clippings: PagedJson(ClippingJson),
+    books: PagedJson(BookJson),
+};
+
+fn mapEntities(allocator: Allocator, items: anytype, args: anytype) ![]@typeInfo(@TypeOf(items)).pointer.child.Json {
+    const T = @typeInfo(@TypeOf(items)).pointer.child;
+    const TargetType = T.Json;
+    const result = try allocator.alloc(TargetType, items.len);
+
+    for (items, 0..) |item, i| {
+        const full_args = .{item} ++ args;
+        result[i] = @call(.auto, TargetType.from, full_args);
+    }
+    return result;
+}
+
+fn mapClippings(allocator: Allocator, clippings: []const Clipping) ![]const ClippingJson {
+    return mapEntities(allocator, clippings, .{});
+}
+
+fn mapBooks(allocator: Allocator, books: []const Book, library: *const Library) ![]const BookJson {
+    return mapEntities(allocator, books, .{library});
+}
+
+fn toJson(allocator: Allocator, value: anytype) ![]u8 {
+    return std.json.Stringify.valueAlloc(allocator, value, .{});
+}
 
 const SearchType = enum {
     all,
@@ -152,7 +199,10 @@ pub const Server = struct {
         const all_clippings = self.library.getAllClippings();
         const result = paginateWithMeta(all_clippings, ctx.getPagination());
 
-        const json = try self.toJsonPaged(result.page, result.meta, writeClippingJson);
+        const data = try mapClippings(self.allocator, result.page);
+        defer self.allocator.free(data);
+
+        const json = try toJson(self.allocator, PagedJson(ClippingJson){ .data = data, .meta = result.meta });
         defer self.allocator.free(json);
         try self.sendJson(ctx.request, json);
     }
@@ -161,7 +211,10 @@ pub const Server = struct {
         const all_books = self.library.getBooks();
         const result = paginateWithMeta(all_books, ctx.getPagination());
 
-        const json = try self.toJsonPaged(result.page, result.meta, writeBookJson);
+        const data = try mapBooks(self.allocator, result.page, self.library);
+        defer self.allocator.free(data);
+
+        const json = try toJson(self.allocator, PagedJson(BookJson){ .data = data, .meta = result.meta });
         defer self.allocator.free(json);
         try self.sendJson(ctx.request, json);
     }
@@ -180,7 +233,16 @@ pub const Server = struct {
         const clippings = all_clippings orelse &[_]Clipping{};
         const result = paginateWithMeta(clippings, ctx.getPagination());
 
-        const json = try self.bookWithClippingsToJsonPaged(book, result.page, result.meta);
+        const clippings_json = try mapClippings(self.allocator, result.page);
+        defer self.allocator.free(clippings_json);
+
+        const json = try toJson(self.allocator, BookDetailJson{
+            .id = book.id,
+            .title = book.title,
+            .author = book.author,
+            .clippings = clippings_json,
+            .meta = result.meta,
+        });
         defer self.allocator.free(json);
         try self.sendJson(ctx.request, json);
     }
@@ -257,7 +319,11 @@ pub const Server = struct {
                 const all_results = self.library.searchClippings(query, params.fields);
                 defer self.allocator.free(all_results);
                 const result = paginateWithMeta(all_results, params.pagination);
-                const json = try self.toJsonPaged(result.page, result.meta, writeClippingJson);
+
+                const data = try mapClippings(self.allocator, result.page);
+                defer self.allocator.free(data);
+
+                const json = try toJson(self.allocator, PagedJson(ClippingJson){ .data = data, .meta = result.meta });
                 defer self.allocator.free(json);
                 try self.sendJson(ctx.request, json);
             },
@@ -265,7 +331,11 @@ pub const Server = struct {
                 const all_results = self.library.searchBooks(query, params.fields);
                 defer self.allocator.free(all_results);
                 const result = paginateWithMeta(all_results, params.pagination);
-                const json = try self.toJsonPaged(result.page, result.meta, writeBookJson);
+
+                const data = try mapBooks(self.allocator, result.page, self.library);
+                defer self.allocator.free(data);
+
+                const json = try toJson(self.allocator, PagedJson(BookJson){ .data = data, .meta = result.meta });
                 defer self.allocator.free(json);
                 try self.sendJson(ctx.request, json);
             },
@@ -288,7 +358,15 @@ pub const Server = struct {
                     .offset = 0,
                 });
 
-                const json = try self.searchAllToJson(clippings_result.page, clippings_result.meta, books_result.page, books_result.meta);
+                const clippings_data = try mapClippings(self.allocator, clippings_result.page);
+                defer self.allocator.free(clippings_data);
+                const books_data = try mapBooks(self.allocator, books_result.page, self.library);
+                defer self.allocator.free(books_data);
+
+                const json = try toJson(self.allocator, SearchAllJson{
+                    .clippings = .{ .data = clippings_data, .meta = clippings_result.meta },
+                    .books = .{ .data = books_data, .meta = books_result.meta },
+                });
                 defer self.allocator.free(json);
                 try self.sendJson(ctx.request, json);
             },
@@ -368,112 +446,6 @@ pub const Server = struct {
                 .{ .name = "content-type", .value = "application/json" },
             },
         });
-    }
-
-    fn toJsonPaged(
-        self: *Server,
-        items: anytype,
-        meta: PageMeta,
-        comptime writeItemFn: fn (*Server, anytype, std.meta.Elem(@TypeOf(items))) anyerror!void,
-    ) ![]u8 {
-        var json: std.ArrayListUnmanaged(u8) = .empty;
-        var writer = json.writer(self.allocator);
-
-        try writer.writeAll("{\"data\":[");
-        for (items, 0..) |item, i| {
-            if (i > 0) try writer.writeByte(',');
-            try writeItemFn(self, writer, item);
-        }
-        try writer.writeAll("],\"meta\":");
-        try writePageMeta(writer, meta);
-        try writer.writeByte('}');
-
-        return json.toOwnedSlice(self.allocator);
-    }
-
-    fn searchAllToJson(self: *Server, clippings: []const Clipping, clippings_meta: PageMeta, books: []const Book, books_meta: PageMeta) ![]u8 {
-        var json: std.ArrayListUnmanaged(u8) = .empty;
-        var writer = json.writer(self.allocator);
-
-        try writer.writeAll("{\"clippings\":{\"data\":[");
-        for (clippings, 0..) |clipping, i| {
-            if (i > 0) try writer.writeByte(',');
-            try self.writeClippingJson(writer, clipping);
-        }
-        try writer.writeAll("],\"meta\":");
-        try writePageMeta(writer, clippings_meta);
-        try writer.writeAll("},\"books\":{\"data\":[");
-        for (books, 0..) |book, i| {
-            if (i > 0) try writer.writeByte(',');
-            try self.writeBookJson(writer, book);
-        }
-        try writer.writeAll("],\"meta\":");
-        try writePageMeta(writer, books_meta);
-        try writer.writeAll("}}");
-
-        return json.toOwnedSlice(self.allocator);
-    }
-
-    fn bookWithClippingsToJsonPaged(self: *Server, book: Book, clippings: []const Clipping, meta: PageMeta) ![]u8 {
-        var json: std.ArrayListUnmanaged(u8) = .empty;
-        var writer = json.writer(self.allocator);
-
-        try writer.writeAll("{\"id\":\"");
-        try writer.writeAll(book.id);
-        try writer.writeAll("\",\"title\":");
-        try writeJsonString(writer, book.title);
-        try writer.writeAll(",\"author\":");
-        try writeJsonString(writer, book.author);
-        try writer.writeAll(",\"clippings\":[");
-
-        for (clippings, 0..) |clipping, i| {
-            if (i > 0) try writer.writeByte(',');
-            try self.writeClippingJson(writer, clipping);
-        }
-
-        try writer.writeAll("],\"meta\":");
-        try writePageMeta(writer, meta);
-        try writer.writeByte('}');
-
-        return json.toOwnedSlice(self.allocator);
-    }
-
-    fn writeClippingJson(self: *Server, writer: anytype, clipping: Clipping) !void {
-        _ = self;
-        try writer.writeAll("{\"book_id\":\"");
-        try writer.writeAll(clipping.book_id);
-        try writer.writeAll("\",\"page\":");
-        if (clipping.page) |page| {
-            try writer.print("{d}", .{page});
-        } else {
-            try writer.writeAll("null");
-        }
-        try writer.writeAll(",\"location_start\":");
-        try writer.print("{d}", .{clipping.location_start});
-        try writer.writeAll(",\"location_end\":");
-        if (clipping.location_end) |end| {
-            try writer.print("{d}", .{end});
-        } else {
-            try writer.writeAll("null");
-        }
-        try writer.writeAll(",\"added_at\":\"");
-        try writeIso8601(writer, clipping.added_at);
-        try writer.writeByte('"');
-        try writer.writeAll(",\"text\":");
-        try writeJsonString(writer, clipping.text);
-        try writer.writeByte('}');
-    }
-
-    fn writeBookJson(self: *Server, writer: anytype, book: Book) !void {
-        try writer.writeAll("{\"id\":\"");
-        try writer.writeAll(book.id);
-        try writer.writeAll("\",\"title\":");
-        try writeJsonString(writer, book.title);
-        try writer.writeAll(",\"author\":");
-        try writeJsonString(writer, book.author);
-        try writer.writeAll(",\"clipping_count\":");
-        try writer.print("{d}", .{self.library.getClippingCountForBook(book.id)});
-        try writer.writeByte('}');
     }
 };
 
@@ -618,56 +590,6 @@ fn paginateWithMeta(items: anytype, pagination: Pagination) struct { page: @Type
     };
 }
 
-fn writePageMeta(writer: anytype, meta: PageMeta) !void {
-    try writer.writeAll("{\"total\":");
-    try writer.print("{d}", .{meta.total});
-    try writer.writeAll(",\"limit\":");
-    try writer.print("{d}", .{meta.limit});
-    try writer.writeAll(",\"offset\":");
-    try writer.print("{d}", .{meta.offset});
-    try writer.writeAll(",\"has_more\":");
-    try writer.writeAll(if (meta.has_more) "true" else "false");
-    try writer.writeByte('}');
-}
-
-fn writeIso8601(writer: anytype, epoch: i64) !void {
-    const epoch_secs = std.time.epoch.EpochSeconds{ .secs = @intCast(epoch) };
-    const epoch_day = epoch_secs.getEpochDay();
-    const year_day = epoch_day.calculateYearDay();
-    const month_day = year_day.calculateMonthDay();
-    const day_secs = epoch_secs.getDaySeconds();
-
-    try writer.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
-        year_day.year,
-        month_day.month.numeric(),
-        month_day.day_index + 1,
-        day_secs.getHoursIntoDay(),
-        day_secs.getMinutesIntoHour(),
-        day_secs.getSecondsIntoMinute(),
-    });
-}
-
-fn writeJsonString(writer: anytype, str: []const u8) !void {
-    try writer.writeByte('"');
-    for (str) |c| {
-        switch (c) {
-            '"' => try writer.writeAll("\\\""),
-            '\\' => try writer.writeAll("\\\\"),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
-            else => {
-                if (c < 0x20) {
-                    try writer.print("\\u{x:0>4}", .{c});
-                } else {
-                    try writer.writeByte(c);
-                }
-            },
-        }
-    }
-    try writer.writeByte('"');
-}
-
 test "parse query params" {
     const p1 = parseQueryParams("/clippings?limit=10&offset=20");
     try std.testing.expectEqual(@as(usize, 10), p1.limit);
@@ -702,11 +624,9 @@ test "paginate" {
     try std.testing.expectEqual(@as(usize, 0), page3.len);
 }
 
-test "write iso8601" {
-    var buf: [32]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    const writer = fbs.writer();
-
-    try writeIso8601(writer, 1655163452);
-    try std.testing.expectEqualStrings("2022-06-13T23:37:32Z", fbs.getWritten());
+test "iso8601 json serialization" {
+    const ts = Iso8601{ .epoch = 1655163452 };
+    const json = try std.json.Stringify.valueAlloc(std.testing.allocator, ts, .{});
+    defer std.testing.allocator.free(json);
+    try std.testing.expectEqualStrings("\"2022-06-13T23:37:32Z\"", json);
 }

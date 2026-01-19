@@ -1,5 +1,9 @@
 pub const library = @import("domain/library.zig");
+pub const models = @import("domain/models.zig");
 pub const Library = library.Library;
 pub const Clipping = library.Clipping;
 pub const Book = library.Book;
 pub const SearchFields = library.Library.SearchFields;
+pub const BookJson = models.BookJson;
+pub const ClippingJson = models.ClippingJson;
+pub const Iso8601 = models.Iso8601;
