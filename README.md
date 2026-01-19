@@ -1,6 +1,6 @@
 # Klippy
 
-A REST API for serving Kindle clippings, written in Zig.
+A keyboard-driven app for browsing and reviewing Kindle clippings. Zig backend, React frontend.
 
 ## Quick Start
 
@@ -95,7 +95,7 @@ The root path `/` (and `/index.html`, `/index.htm`) serves `public/index.html`.
 ## Project Structure
 
 ```
-src/
+src/                      # Zig backend
 ├── main.zig              # Entry point, wires library + server
 ├── server.zig            # HTTP layer, routing, JSON serialization
 ├── domain.zig            # Public API (re-exports Library, Clipping, Book)
@@ -104,12 +104,21 @@ src/
     ├── parser.zig        # Parses clippings.txt format
     └── models.zig        # Clipping, Book structs
 
+frontend/                 # React frontend (Vite)
+├── src/
+│   ├── main.tsx          # Entry point
+│   ├── App.tsx           # Router + Query providers
+│   ├── routes/           # TanStack Router pages
+│   ├── api/              # API client + types
+│   └── components/       # Shared components
+├── index.html
+├── vite.config.ts
+└── package.json
+
 data/
 └── clippings.txt         # Kindle clippings file (My Clippings.txt)
 
-public/                   # Static files served by the server
-├── index.html            # Main entry point (served at /)
-├── assets/               # CSS, JS, images (served at /assets/*)
+public/                   # Built frontend (generated, served by Zig)
 ```
 
 ## Architecture
@@ -133,11 +142,12 @@ Books are identified by a 16-char hex hash of `title + author`. This provides st
 ## Commands
 
 ```bash
-make build    # Compile
-make run      # Build and run server
-make test     # Run tests
-make clean    # Remove build artifacts
-make watch    # Watch mode (requires entr)
+make build    # Build frontend + backend
+make run      # Run server (serves built frontend)
+make dev      # Run frontend + backend dev servers
+make test     # Run Zig tests
+make clean    # Remove all build artifacts
+make watch    # Watch mode for Zig (requires entr)
 ```
 
 ## Data Format
@@ -157,33 +167,64 @@ Highlighted text here
 - [x] Search endpoint with field filtering
 - [x] Static file serving
 - [x] Index page route
-- [ ] Frontend UI
+- [x] Frontend UI
 - [ ] Authentication
 
-## Frontend Development
+## Frontend
 
-The backend is ready to serve a frontend. To implement the UI:
+A React SPA built with Vite, TanStack Router, and TanStack Query.
 
-1. Create `public/index.html` as the main entry point
-2. Place CSS/JS in `public/` (served via `/assets/*`)
+### Running
 
-**Available API endpoints for the frontend:**
+```bash
+# Development (frontend + backend)
+make dev
 
-| Endpoint | Use Case |
-|----------|----------|
-| `GET /books` | List all books with clipping counts |
-| `GET /books/:id` | Get book details + clippings |
-| `GET /clippings` | Browse all clippings |
-| `GET /search?q=...` | Search across books and clippings |
-
-**Suggested features:**
-- Book list view with search
-- Book detail view showing clippings
-- Global search with type filtering
-- Pagination controls
-
-**Example fetch:**
-```javascript
-const response = await fetch('/search?q=philosophy&type=books');
-const { data, meta } = await response.json();
+# Production build
+make build
+make run
+# Visit http://localhost:3000
 ```
+
+### Features
+
+- **Book library** — Browse all books with clipping counts
+- **Search** — Filter books by title/author
+- **Flashcard mode** — Review clippings one at a time with flip animation
+- **Keyboard-driven** — Full vim-style navigation
+
+### Keyboard Shortcuts
+
+**Book list:**
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Navigate up/down |
+| `o` / `Enter` | Open book |
+| `/` | Focus search |
+| `g` / `G` | First / last |
+
+**Clipping list:**
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Navigate up/down |
+| `f` | Switch to flashcards |
+| `q` | Back to library |
+| `g` / `G` | First / last |
+
+**Flashcard mode:**
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Next / previous card |
+| `Space` | Flip card |
+| `r` | Random card |
+| `0-9` | Jump to 0-90% |
+| `g` / `G` | First / last |
+| `q` | Exit to list |
+
+### Tech Stack
+
+- **Vite** — Build tool with HMR
+- **React 19** — UI framework
+- **TanStack Router** — File-based routing
+- **TanStack Query** — Data fetching and caching
+- **TypeScript** — Type safety

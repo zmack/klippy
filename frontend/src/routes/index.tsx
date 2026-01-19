@@ -1,7 +1,7 @@
-import { createFileRoute, Link } from '@tanstack/react-router';
+import { createFileRoute, Link, useNavigate } from '@tanstack/react-router';
 import { useQuery } from '@tanstack/react-query';
 import { getBooks, searchBooks } from '../api/client';
-import { useState } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import type { PaginatedResponse, Book } from '../api/types';
 
 export const Route = createFileRoute('/')({
@@ -11,6 +11,10 @@ export const Route = createFileRoute('/')({
 function HomePage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [offset, setOffset] = useState(0);
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+  const navigate = useNavigate();
   const limit = 20;
 
   const booksQuery = useQuery({
@@ -23,9 +27,74 @@ function HomePage() {
     },
   });
 
+  const books = booksQuery.data?.data ?? [];
+
+  // Reset selection when data changes
+  useEffect(() => {
+    setSelectedIndex(0);
+  }, [offset, searchQuery]);
+
+  // Scroll selected item into view
+  useEffect(() => {
+    if (listRef.current && books.length > 0) {
+      const item = listRef.current.children[selectedIndex] as HTMLElement;
+      item?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }, [selectedIndex, books.length]);
+
+  const openSelected = useCallback(() => {
+    if (books[selectedIndex]) {
+      navigate({ to: '/books/$bookId', params: { bookId: books[selectedIndex].id } });
+    }
+  }, [books, selectedIndex, navigate]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't handle if typing in search
+      if (document.activeElement === searchInputRef.current) {
+        if (e.key === 'Escape') {
+          searchInputRef.current?.blur();
+        }
+        return;
+      }
+
+      switch (e.key) {
+        case 'j':
+        case 'ArrowDown':
+          e.preventDefault();
+          setSelectedIndex(i => Math.min(i + 1, books.length - 1));
+          break;
+        case 'k':
+        case 'ArrowUp':
+          e.preventDefault();
+          setSelectedIndex(i => Math.max(i - 1, 0));
+          break;
+        case 'o':
+        case 'Enter':
+          e.preventDefault();
+          openSelected();
+          break;
+        case '/':
+          e.preventDefault();
+          searchInputRef.current?.focus();
+          break;
+        case 'g':
+          setSelectedIndex(0);
+          break;
+        case 'G':
+          setSelectedIndex(books.length - 1);
+          break;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [books.length, openSelected]);
+
   const handleSearch = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setOffset(0);
+    searchInputRef.current?.blur();
   };
 
   return (
@@ -35,10 +104,11 @@ function HomePage() {
 
       <form onSubmit={handleSearch} className="search-form">
         <input
+          ref={searchInputRef}
           type="text"
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
-          placeholder="Search your books..."
+          placeholder="Search your books... (press /)"
           className="search-input"
         />
         <button type="submit" className="btn btn-primary">Search</button>
@@ -58,18 +128,22 @@ function HomePage() {
       {booksQuery.data && (
         <>
           <p className="results-summary">
-            Showing {booksQuery.data.data.length} of {booksQuery.data.meta.total} books
+            Showing {books.length} of {booksQuery.data.meta.total} books
+            <span className="kbd-hint"> · J/K navigate · O open · / search</span>
           </p>
 
-          {booksQuery.data.data.length === 0 ? (
+          {books.length === 0 ? (
             <div className="empty-state">
               <div className="empty-state-icon">📖</div>
               <p>No books found</p>
             </div>
           ) : (
-            <ul className="book-list">
-              {booksQuery.data.data.map((book) => (
-                <li key={book.id} className="book-card">
+            <ul className="book-list" ref={listRef}>
+              {books.map((book, index) => (
+                <li
+                  key={book.id}
+                  className={`book-card ${index === selectedIndex ? 'is-focused' : ''}`}
+                >
                   <Link
                     to="/books/$bookId"
                     params={{ bookId: book.id }}

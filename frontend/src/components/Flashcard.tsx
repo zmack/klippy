@@ -40,6 +40,51 @@ export function Flashcard({ clippings, onExit }: FlashcardProps) {
     setIsFlipped(f => !f);
   }, []);
 
+  const goToRandom = useCallback(() => {
+    const randomIndex = Math.floor(Math.random() * clippings.length);
+    setDirection(randomIndex > currentIndex ? 'next' : 'prev');
+    setIsFlipped(false);
+    setTimeout(() => {
+      setCurrentIndex(randomIndex);
+      setDirection(null);
+    }, 150);
+  }, [clippings.length, currentIndex]);
+
+  const goToFirst = useCallback(() => {
+    if (currentIndex !== 0) {
+      setDirection('prev');
+      setIsFlipped(false);
+      setTimeout(() => {
+        setCurrentIndex(0);
+        setDirection(null);
+      }, 150);
+    }
+  }, [currentIndex]);
+
+  const goToLast = useCallback(() => {
+    const lastIndex = clippings.length - 1;
+    if (currentIndex !== lastIndex) {
+      setDirection('next');
+      setIsFlipped(false);
+      setTimeout(() => {
+        setCurrentIndex(lastIndex);
+        setDirection(null);
+      }, 150);
+    }
+  }, [clippings.length, currentIndex]);
+
+  const goToPercent = useCallback((percent: number) => {
+    const targetIndex = Math.floor((percent / 100) * (clippings.length - 1));
+    if (targetIndex !== currentIndex) {
+      setDirection(targetIndex > currentIndex ? 'next' : 'prev');
+      setIsFlipped(false);
+      setTimeout(() => {
+        setCurrentIndex(targetIndex);
+        setDirection(null);
+      }, 150);
+    }
+  }, [clippings.length, currentIndex]);
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       switch (e.key) {
@@ -56,15 +101,56 @@ export function Flashcard({ clippings, onExit }: FlashcardProps) {
           e.preventDefault();
           flip();
           break;
-        case 'Escape':
+        case 'q':
           onExit();
+          break;
+        case 'r':
+          goToRandom();
+          break;
+        case 'Home':
+        case 'g':
+          goToFirst();
+          break;
+        case 'End':
+        case 'G':
+          goToLast();
+          break;
+        case '1':
+          goToPercent(10);
+          break;
+        case '2':
+          goToPercent(20);
+          break;
+        case '3':
+          goToPercent(30);
+          break;
+        case '4':
+          goToPercent(40);
+          break;
+        case '5':
+          goToPercent(50);
+          break;
+        case '6':
+          goToPercent(60);
+          break;
+        case '7':
+          goToPercent(70);
+          break;
+        case '8':
+          goToPercent(80);
+          break;
+        case '9':
+          goToPercent(90);
+          break;
+        case '0':
+          goToFirst();
           break;
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [goNext, goPrev, flip, onExit]);
+  }, [goNext, goPrev, flip, onExit, goToRandom, goToFirst, goToLast, goToPercent]);
 
   const formatDate = (dateStr: string) => {
     return new Date(dateStr).toLocaleDateString('en-US', {
@@ -113,7 +199,7 @@ export function Flashcard({ clippings, onExit }: FlashcardProps) {
           <div className="flashcard-inner">
             <div className="flashcard-front">
               <div className="flashcard-content">
-                <p className="flashcard-text">{currentClipping.text}</p>
+                <p className={`flashcard-text ${getTextSizeClass(currentClipping.text)}`}>{currentClipping.text}</p>
               </div>
               <div className="flashcard-hint">Click or press Space to flip</div>
             </div>
@@ -155,9 +241,11 @@ export function Flashcard({ clippings, onExit }: FlashcardProps) {
       </div>
 
       <div className="flashcard-instructions">
-        <span>← → or J/K to navigate</span>
-        <span>Space to flip</span>
-        <span>Esc to exit</span>
+        <span>J/K navigate</span>
+        <span>Space flip</span>
+        <span>R random</span>
+        <span>0-9 jump</span>
+        <span>Q exit</span>
       </div>
     </div>
   );

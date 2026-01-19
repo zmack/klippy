@@ -109,45 +109,31 @@ body::before {
 .header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: var(--space-lg) var(--space-xl);
-  margin-bottom: var(--space-xl);
-  background: var(--color-cream);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-card);
-  border: 1px solid var(--color-paper-edge);
-  position: relative;
+  justify-content: center;
+  padding: var(--space-sm) 0;
+  margin-bottom: var(--space-lg);
 }
-
 
 .logo {
   font-family: var(--font-serif);
-  font-size: 1.75rem;
-  font-weight: 700;
-  color: var(--color-leather-dark);
+  font-size: 1rem;
+  font-weight: 400;
+  color: var(--color-ink-faded);
   text-decoration: none;
-  letter-spacing: -0.02em;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
   display: flex;
   align-items: center;
   gap: var(--space-sm);
+  transition: color 0.2s;
 }
 
 .logo:hover {
-  color: var(--color-leather);
+  color: var(--color-ink-light);
 }
 
 .logo-icon {
-  font-size: 1.5rem;
-}
-
-@media (max-width: 640px) {
-  .header {
-    padding: var(--space-md) var(--space-lg);
-  }
-
-  .logo {
-    font-size: 1.5rem;
-  }
+  font-size: 1rem;
 }
 
 /* ===== Main Content ===== */
@@ -306,6 +292,11 @@ body::before {
   box-shadow: var(--shadow-lifted);
 }
 
+.book-card.is-focused {
+  border-color: var(--color-gold-muted);
+  box-shadow: var(--shadow-lifted), 0 0 0 2px var(--color-gold-muted);
+}
+
 /* Index card hole punches */
 .book-card::before {
   content: '';
@@ -389,6 +380,12 @@ body::before {
   border: 1px solid var(--color-paper-edge);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-page);
+  transition: box-shadow 0.15s, border-color 0.15s;
+}
+
+.clipping-card.is-focused {
+  border-color: var(--color-gold-muted);
+  box-shadow: var(--shadow-lifted), 0 0 0 2px var(--color-gold-muted);
 }
 
 /* Highlight marker effect on left edge */
@@ -516,6 +513,10 @@ body::before {
   margin-bottom: var(--space-lg);
   padding-bottom: var(--space-md);
   border-bottom: 1px dashed var(--color-paper-edge);
+}
+
+.kbd-hint {
+  opacity: 0.7;
 }
 
 /* ===== View Toggle ===== */
